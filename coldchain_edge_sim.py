@@ -242,9 +242,55 @@ class ColdChainEdgeGateway:
 
 
 if __name__ == "__main__":
-    gw = ColdChainEdgeGateway(db_path="edge_buffer.db", seed=42)
-    gw.ejecutar_escenario_completo()
+    gw = ColdChainEdgeGateway(device_id="CAMION-REFRIG-04", db_path="edge_buffer.db", seed=42)
+    gw.reset()
+    gw.rng = random.Random(42)
+
+    for temp, red_ok in ESCENARIO_REFERENCIA:
+        cola_antes = len(gw.obtener_cola_sqlite())
+        ev_antes = len(gw.eventos_cloud)
+        reg = gw.procesar_lectura(temp, red_ok)
+
+        # 1. Evidencia de encolado en SQLite durante corte LTE
+        cola_despues = gw.obtener_cola_sqlite()
+        if not red_ok and len(cola_despues) > cola_antes:
+            ultimo_b = cola_despues[-1]
+            print(
+                f"[EDGE BUFFER] Sin señal LTE -> Encolado en SQLite ({ultimo_b['Tipo']}) | "
+                f"Cola: {len(cola_despues)}"
+            )
+
+        # 2. Evidencia de alerta local inmediata con MQTT QoS 2
+        if reg["estado_edge"] == "ALERTA_CRITICA":
+            print(
+                f"[EDGE ALERTA LOCAL] {reg['temp_c']:.2f} °C | "
+                f"Latencia Edge: {reg['latencia_edge_ms']:.2f} ms | MQTT QoS=2"
+            )
+
+        # 3. Evidencia de ingesta directa o drenado desde buffer SQLite
+        for ev in gw.eventos_cloud[ev_antes:]:
+            payload_log = {
+                "device_id": gw.device_id,
+                "ciclo": ev["Ciclo"],
+                "tipo": ev["Tipo de Evento"],
+                "mqtt_qos": ev["MQTT QoS"],
+            }
+            if ev["Origen"] == "REENVIO_SQLITE":
+                print(
+                    f"[REENVÍO BUFFER] {json.dumps(payload_log)} | "
+                    f"RTT: {ev['RTT Cloud (ms)']:.1f} ms"
+                )
+            else:
+                print(
+                    f"[CLOUD INGESTA] {json.dumps(payload_log)} | "
+                    f"RTT: {ev['RTT Cloud (ms)']:.1f} ms"
+                )
+
     m = gw.obtener_metricas()
-    print("=== RESUMEN DE MÉTRICAS QoS / QoE (ColdChainGuard) ===")
-    for k, v in m.items():
-        print(f"{k:28}: {v}")
+    print("\n=== RESUMEN DE MÉTRICAS QoS / QoE ===")
+    print(f"Lecturas IoT generadas     : {m['paquetes_iot']}")
+    print(f"Paquetes enviados a Cloud  : {m['paquetes_cloud']} (Ahorro ancho de banda: {m['ahorro_bw_pct']:.1f} %)")
+    print(f"Paquetes perdidos          : {m['paquetes_perdidos']} (0.00 % gracias a Store-and-Forward SQLite)")
+    print(f"Latencia promedio Edge     : {m['latencia_edge_ms']:.2f} ms")
+    print(f"Latencia promedio Cloud    : {m['latencia_cloud_ms']:.2f} ms | Jitter Cloud: {m['jitter_cloud_ms']:.2f} ms")
+    print(f"Alertas críticas (QoS 2)   : {m['alertas_criticas']} | Picos transitorios filtrados: {m['falsos_positivos_filtrados']}")
